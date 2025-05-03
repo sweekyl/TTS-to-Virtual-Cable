@@ -1,134 +1,122 @@
-import tkinter as tk
-import gtts
-import pydub
+import io
 import sounddevice as sd
-import soundfile as sf
-import tempfile
-import os
+import numpy as np
+from gtts import gTTS
+from pydub import AudioSegment
+import tkinter as tk
+from tkinter import scrolledtext
 import threading
-import queue
-import time
 
-# Укажи здесь ИНДЕКС или ИМЯ входа твоего виртуального кабеля
-VIRTUAL_CABLE_DEVICE = None # <--- ЗАМЕНИ None НА НУЖНОЕ ЗНАЧЕНИЕ!
+def get_vac_device_index(device_name_part="Line 1 (Virtual Audio Cable)"): # <--- кабель
+    try:
+        devices = sd.query_devices()
+        for i, device in enumerate(devices):
+            if device['max_output_channels'] > 0 and \
+               device_name_part.lower() in device['name'].lower():
+                print(f"Найдено устройство: {i} - {device['name']}")
+                return i
+        print(f"Ошибка: Устройство вывода, содержащее '{device_name_part}', не найдено.")
+        print("Доступные устройства вывода:")
+        for i, device in enumerate(devices):
+            if device['max_output_channels'] > 0:
+                 print(f"  {i}: {device['name']}")
+        return None
+    except Exception as e:
+        print(f"Ошибка при поиске аудиоустройств: {e}")
+        return None
 
-audio_queue = queue.Queue()
-
-def generate_and_queue_speech():
-    text = text_entry.get("1.0", tk.END).strip()
-    if not text:
-        if window.winfo_exists() and speak_button['state'] == tk.DISABLED:
-             window.after(10, lambda: speak_button.config(state=tk.NORMAL))
+def speak_text_to_vac(text, lang='ru', device_index=None, status_label=None):
+    if device_index is None:
+        print("Не указано устройство вывода.")
+        if status_label:
+            status_label.config(text="Ошибка: Устройство вывода не найдено.")
         return
 
-    speak_button.config(state=tk.DISABLED)
-    filepath_mp3 = None
+    if not text:
+        print("Нет текста для озвучивания.")
+        if status_label:
+            status_label.config(text="Введите текст для озвучивания.")
+        return
 
     try:
-        tts = gtts.gTTS(text=text, lang='ru')
-        temp_mp3_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3', dir=None)
-        filepath_mp3 = temp_mp3_file.name
-        temp_mp3_file.close()
-        tts.save(filepath_mp3)
-        audio_queue.put(filepath_mp3)
-    except gtts.tts.gTTSError as e_gtts:
-        print(f"Ошибка gTTS: {e_gtts}")
-        if filepath_mp3 and os.path.exists(filepath_mp3): os.remove(filepath_mp3)
-    except Exception as e_save:
-        print(f"Ошибка при генерации/сохранении: {e_save}")
-        if filepath_mp3 and os.path.exists(filepath_mp3): os.remove(filepath_mp3)
-    finally:
-        if window.winfo_exists():
-            window.after(10, lambda: speak_button.config(state=tk.NORMAL))
+        if status_label:
+            status_label.config(text="Генерация речи...")
+            status_label.update_idletasks()
 
-def audio_playback_thread():
-    while True:
-        filepath_mp3 = None
-        filepath_wav = None
-        stream1_success = False
-        stream2_success = False
-        try:
-            filepath_mp3 = audio_queue.get()
-            if filepath_mp3 is None:
-                break
+        tts = gTTS(text=text, lang=lang)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
 
-            if VIRTUAL_CABLE_DEVICE is None:
-                print("Ошибка: VIRTUAL_CABLE_DEVICE не указано.")
-                if os.path.exists(filepath_mp3): os.remove(filepath_mp3)
-                audio_queue.task_done()
-                continue
+        if status_label:
+            status_label.config(text="Обработка аудио...")
+            status_label.update_idletasks()
 
-            audio_segment = pydub.AudioSegment.from_mp3(filepath_mp3)
-            temp_wav_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav', dir=None)
-            filepath_wav = temp_wav_file.name
-            temp_wav_file.close()
-            audio_segment.export(filepath_wav, format="wav")
+        audio = AudioSegment.from_file(mp3_fp, format="mp3")
+        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+        samples /= np.iinfo(audio.array_type).max
 
-            data, samplerate = sf.read(filepath_wav, dtype='float32')
+        samplerate = audio.frame_rate
 
-            try:
-                sd.play(data, samplerate, device=VIRTUAL_CABLE_DEVICE, blocking=False)
-                stream1_success = True
-            except Exception as e_play1:
-                print(f"Ошибка воспроизведения на {VIRTUAL_CABLE_DEVICE}: {e_play1}")
+        print(f"Воспроизведение на устройстве {device_index} (Частота: {samplerate} Гц)...")
+        if status_label:
+            status_label.config(text="Воспроизведение...")
+            status_label.update_idletasks()
 
-            try:
-                sd.play(data, samplerate, device=None, blocking=False)
-                stream2_success = True
-            except Exception as e_play2:
-                print(f"Ошибка воспроизведения на устройстве по умолчанию: {e_play2}")
+        sd.play(samples, samplerate=samplerate, device=device_index)
+        sd.wait()
 
-            if stream1_success or stream2_success:
-                sd.wait()
+        print("Воспроизведение завершено.")
+        if status_label:
+            status_label.config(text="Готово.")
 
-        except FileNotFoundError:
-             print(f"Ошибка: Не найден файл {filepath_mp3} или {filepath_wav}")
-        except pydub.exceptions.CouldntDecodeError as e_decode:
-             print(f"Ошибка Pydub: Не удалось декодировать MP3 {filepath_mp3}. Проверьте ffmpeg. Ошибка: {e_decode}")
-        except Exception as e_play:
-            print(f"Ошибка обработки/воспроизведения: {e_play}")
-        finally:
-            if filepath_wav and os.path.exists(filepath_wav):
-                try: os.remove(filepath_wav)
-                except Exception as e: print(f"Не удалось удалить WAV {filepath_wav}: {e}")
-            if filepath_mp3 and os.path.exists(filepath_mp3):
-                 try: os.remove(filepath_mp3)
-                 except Exception as e: print(f"Не удалось удалить MP3 {filepath_mp3}: {e}")
-            try: audio_queue.task_done()
-            except ValueError: pass
+    except sd.PortAudioError as pae:
+        print(f"Ошибка PortAudio: {pae}")
+        if status_label:
+            status_label.config(text=f"Ошибка аудио: {pae}")
+    except Exception as e:
+        print(f"Произошла ошибка: {e}")
+        if status_label:
+            error_message = f"Ошибка: {type(e).__name__}"
+            if "No such file or directory: 'ffmpeg'" in str(e) or \
+               "No such file or directory: 'ffprobe'" in str(e):
+                error_message += " (Возможно, не установлен ffmpeg?)"
+            elif "timed out" in str(e).lower():
+                 error_message += " (Ошибка сети или gTTS?)"
+            status_label.config(text=error_message)
 
-def start_generation_thread():
-    if VIRTUAL_CABLE_DEVICE is None:
-         print("Ошибка: VIRTUAL_CABLE_DEVICE не указано в коде.")
-         return
+def on_speak_button_click():
+    user_text = text_area.get("1.0", tk.END).strip()
+    speak_button.config(state=tk.DISABLED)
+    status_label.config(text="Запуск...")
+    tts_thread = threading.Thread(target=run_tts_in_thread, args=(user_text,), daemon=True)
+    tts_thread.start()
 
-    thread = threading.Thread(target=generate_and_queue_speech)
-    thread.daemon = True
-    thread.start()
+def run_tts_in_thread(text):
+    speak_text_to_vac(text, lang='ru', device_index=vac_index, status_label=status_label)
+    window.after(0, lambda: speak_button.config(state=tk.NORMAL))
 
-playback_thread = threading.Thread(target=audio_playback_thread)
-playback_thread.daemon = True
-playback_thread.start()
+if __name__ == "__main__":
+    # имя кабеля для поиска
+    vac_index = get_vac_device_index("Line 1 (Virtual Audio Cable)") # <--- ИЗМЕНЕНО ЗДЕСЬ
 
-window = tk.Tk()
-window.title("TTS v  mikro")
-window.geometry("400x300")
+    if vac_index is None:
+        print("\nНе удалось найти виртуальный аудиокабель. Запуск GUI отменен.")
+    else:
+        window = tk.Tk()
+        window.title("Текст в Речь -> VAC")
+        window.geometry("400x300")
 
-def on_closing():
-    audio_queue.put(None)
-    playback_thread.join(timeout=0.5)
-    window.destroy()
+        instruction_label = tk.Label(window, text="Введите текст для озвучивания:")
+        instruction_label.pack(pady=(10, 0))
 
-window.protocol("WM_DELETE_WINDOW", on_closing)
+        text_area = scrolledtext.ScrolledText(window, wrap=tk.WORD, width=45, height=10, relief=tk.SUNKEN, borderwidth=1)
+        text_area.pack(pady=5, padx=10)
 
-text_entry = tk.Text(window, wrap=tk.WORD, height=10, width=45)
-text_entry.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-text_entry.focus_set()
+        speak_button = tk.Button(window, text="Озвучить", command=on_speak_button_click, width=15, height=2)
+        speak_button.pack(pady=10)
 
-initial_button_state = tk.NORMAL if VIRTUAL_CABLE_DEVICE is not None else tk.DISABLED
-speak_button = tk.Button(window, text="Озвучить", command=start_generation_thread, height=2, state=initial_button_state)
-speak_button.pack(fill=tk.X, padx=10, pady=(0, 10))
+        status_label = tk.Label(window, text="Готово к работе.", relief=tk.SUNKEN, anchor=tk.W)
+        status_label.pack(fill=tk.X, padx=10, pady=(0, 5), ipady=2)
 
-window.mainloop()
-
-print("Программа завершена.")
+        window.mainloop()
