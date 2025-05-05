@@ -6,7 +6,6 @@ from pydub import AudioSegment
 import tkinter as tk
 from tkinter import scrolledtext, Frame
 import threading
-import time
 
 vac_index = None
 window = None
